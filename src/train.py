@@ -19,7 +19,7 @@ elif torch.backends.mps.is_available():
     DEVICE = torch.device("mps")
 else:
     DEVICE = torch.device("cpu")
-BATCH_SIZE = 4
+BATCH_SIZE = 8
 EPOCHS = 50
 LEARNING_RATE = 1e-4
 MODEL_SAVE_PATH = "resunet_model.pth"
@@ -40,6 +40,8 @@ AUGMENTATION_SCALE_MAX_ZOOM_PERCENTAGE = 0.2
 EXTRA_CHANNELS_HESSIAN = False  # whether to add hessian channel to the input images
 EXTRA_CHANNELS_HESSIAN_SIGMAS = [3.0]  # list of sigmas to use for the hessian filter
 EXTRA_CHANNELS_HESSIAN_NORMALISED = True
+
+RESIZE_TO_SIZE = 256  # resize images and masks to this size for training and validation
 
 IN_CHANNELS = 1 + len(EXTRA_CHANNELS_HESSIAN_SIGMAS) if EXTRA_CHANNELS_HESSIAN else 1
 OUT_CHANNELS = 1
@@ -153,6 +155,7 @@ def get_loaders(
     batch_size: int,
     vmin: float,
     vmax: float,
+    resize_to_size: int | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     """
     Get the training and validation data loaders.
@@ -167,6 +170,12 @@ def get_loaders(
         Fraction of the data to use for validation.
     batch_size : int
         Batch size for the data loaders.
+    vmin : float
+        Minimum value for normalising the images.
+    vmax : float
+        Maximum value for normalising the images.
+    resize_to_size : int | None, optional
+        Resize images and masks to this size, by default None (no resizing).
 
     Returns
     -------
@@ -185,6 +194,7 @@ def get_loaders(
         augment_flip_rot=True,
         augment_scale=True,
         augment_max_zoom_percentage=0.1,
+        resize_to_size=resize_to_size,
     )
     val_dataset = SegmentationDataset(
         image_files=val_image_files,
@@ -194,6 +204,7 @@ def get_loaders(
         augment_flip_rot=False,
         augment_scale=False,
         augment_max_zoom_percentage=0.1,
+        resize_to_size=resize_to_size,
     )
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -339,6 +350,7 @@ class SegmentationDataset(torch.utils.data.Dataset):
         augment_flip_rot: bool,
         augment_scale: bool,
         augment_max_zoom_percentage: float,
+        resize_to_size: int | None,
     ) -> None:
         """Initialise."""
         self.image_files = image_files
@@ -348,6 +360,7 @@ class SegmentationDataset(torch.utils.data.Dataset):
         self.augment_flip_rot = augment_flip_rot
         self.augment_scale = augment_scale
         self.augment_max_zoom_percentage = augment_max_zoom_percentage
+        self.resize_to_size = resize_to_size
 
     def __len__(self) -> int:
         """Return the length of the dataset."""
@@ -357,6 +370,32 @@ class SegmentationDataset(torch.utils.data.Dataset):
         """Get an item from the dataset and augment if needed."""
         image_original = torch.from_numpy(np.load(self.image_files[index])).float()  # [H, W]
         mask = torch.from_numpy(np.load(self.mask_files[index]).astype(bool)).float()  # [C, H, W] | [H, W]
+
+        if self.resize_to_size is not None:
+            # resize image if needed
+            image_original = (
+                torch.nn.functional.interpolate(
+                    image_original.unsqueeze(0).unsqueeze(0),  # add batch and channel dimensions for interpolation
+                    size=(self.resize_to_size, self.resize_to_size),
+                    mode="bilinear",
+                    align_corners=False,  # apparently this is default for bilinear
+                )
+                .squeeze(0)
+                .squeeze(0)
+            )  # remove the batch and channel dimensions
+            # resize mask if needed
+            mask = (
+                torch.nn.functional.interpolate(
+                    mask.unsqueeze(0).unsqueeze(0),  # add batch and channel dimensions for interpolation
+                    size=(self.resize_to_size, self.resize_to_size),
+                    mode="nearest",  # use nearest neighbour for masks to avoid interpolation artifacts
+                )
+                .squeeze(0)
+                .squeeze(0)
+            )  # remove the batch and channel dimensions
+            # ensure the mask is still binary after resizing
+            mask = (mask > 0.5).float()
+
         # add channel dim if missing
         if mask.ndim == 2:
             mask = mask.unsqueeze(0)  # [C, H, W]
@@ -430,6 +469,7 @@ def main():
         batch_size=BATCH_SIZE,
         vmin=-1.0,
         vmax=5.0,
+        resize_to_size=RESIZE_TO_SIZE,
     )
 
     # initialise model, loss function, and optimiser
