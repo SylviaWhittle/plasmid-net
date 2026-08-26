@@ -42,6 +42,9 @@ EXTRA_CHANNELS_HESSIAN_SIGMAS = [3.0]  # list of sigmas to use for the hessian f
 EXTRA_CHANNELS_HESSIAN_NORMALISED = True
 
 RESIZE_TO_SIZE = 256  # resize images and masks to this size for training and validation
+# normalisation values for the images
+VMIN = -1.0
+VMAX = 5.0
 
 IN_CHANNELS = 1 + len(EXTRA_CHANNELS_HESSIAN_SIGMAS) if EXTRA_CHANNELS_HESSIAN else 1
 OUT_CHANNELS = 1
@@ -467,8 +470,8 @@ def main():
         masks_paths=train_mask_files,
         val_split=0.2,
         batch_size=BATCH_SIZE,
-        vmin=-1.0,
-        vmax=5.0,
+        vmin=VMIN,
+        vmax=VMAX,
         resize_to_size=RESIZE_TO_SIZE,
     )
 
