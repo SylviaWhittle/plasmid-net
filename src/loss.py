@@ -71,13 +71,19 @@ class PermutationInvariantDiceLoss_2_channel(nn.Module):
         return loss.mean()
 
 
-def dice_loss(pred, target, eps=1e-6):
+def dice_loss(logits, target, eps=1e-6):
     """Compute the Dice loss between predicted and target tensors."""
-    pred = pred.sigmoid() if pred.dtype.is_floating_point and pred.max() > 1 else pred
-    pred_flat = pred.view(pred.size(0), -1)
-    targ_flat = target.view(target.size(0), -1)
-    intersection = (pred_flat * targ_flat).sum(dim=1)
-    union = pred_flat.sum(dim=1) + targ_flat.sum(dim=1)
+
+    # pred = pred.sigmoid() if pred.dtype.is_floating_point and pred.max() > 1 else pred # - this assumes probabilities
+    # if the maximum logit is at most 1.
+
+    pred = torch.sigmoid(logits)
+    # pred_flat = pred.view(pred.size(0), -1)
+    pred_flat = pred.flatten(1)  # flatten the tensor - ie from [B, C, H, W] to [B, C*H*W]
+    # targ_flat = target.view(target.size(0), -1)
+    target_flat = target.flatten(1)
+    intersection = (pred_flat * target_flat).sum(dim=1)
+    union = pred_flat.sum(dim=1) + target_flat.sum(dim=1)
     dice = (2.0 * intersection + eps) / (union + eps)
     return 1.0 - dice.mean()
 
