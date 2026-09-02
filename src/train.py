@@ -9,6 +9,7 @@ from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 from skimage.filters import hessian
+from skimage.morphology import skeletonize
 
 from src.resunet import ResUNet
 from src.loss import BCEWithLogitsDiceLoss
@@ -48,6 +49,9 @@ VMAX = 5.0
 
 IN_CHANNELS = 1 + len(EXTRA_CHANNELS_HESSIAN_SIGMAS) if EXTRA_CHANNELS_HESSIAN else 1
 OUT_CHANNELS = 1
+
+# eval
+EVAL_HEIGHT_THRESHOLD = (1.1 - VMIN) / (VMAX - VMIN)  # threshold for classical height-based thresholding
 
 
 def seed_everything(seed: int) -> None:
@@ -533,7 +537,14 @@ def main():
     model.eval()
     with torch.no_grad():
         num_rows = len(val_loader)
-        num_cols = IN_CHANNELS + OUT_CHANNELS * 2  # input channels + target channels + predicted channels
+        num_cols = IN_CHANNELS + OUT_CHANNELS * 2 + 1 + 1 + 1 + 1
+        # input channels
+        # target channels
+        # classical threshold binary
+        # classical threshold skeleton
+        # predicted channels
+        # thresholded predicted
+        # skeletonized thresholded predicted
         plt.figure(figsize=(15, 5 * num_rows))
         for i, (images, targets) in enumerate(val_loader):
             col_index = 0
@@ -567,10 +578,41 @@ def main():
             plt.axis("off")
             col_index += 1
 
+            # classical threshold binary mask
+            classical_threshold_mask = (images[0, 0] > EVAL_HEIGHT_THRESHOLD).float()
+            plt.subplot(num_rows, num_cols, i * num_cols + col_index + 1)
+            plt.imshow(classical_threshold_mask.cpu(), cmap="gray")
+            plt.title("Threshold Binary Mask")
+            plt.axis("off")
+            col_index += 1
+
+            classical_threshold_mask_skeleton = skeletonize(classical_threshold_mask.cpu().numpy())
+            plt.subplot(num_rows, num_cols, i * num_cols + col_index + 1)
+            plt.imshow(classical_threshold_mask_skeleton, cmap="gray")
+            plt.title("Threshold Skeletonized Mask")
+            plt.axis("off")
+            col_index += 1
+
             # plot the predicted mask channels
             plt.subplot(num_rows, num_cols, i * num_cols + col_index + 1)
             plt.imshow(outputs[0, 0].cpu(), cmap="gray")
             plt.title("Predicted Mask")
+            plt.axis("off")
+            col_index += 1
+
+            # plot the thresholded predicted mask
+            thresholded_outputs = (outputs[0, 0] > 0.5).float()
+            plt.subplot(num_rows, num_cols, i * num_cols + col_index + 1)
+            plt.imshow(thresholded_outputs.cpu(), cmap="gray")
+            plt.title("Thresholded Predicted Mask")
+            plt.axis("off")
+            col_index += 1
+
+            # plot the skeletonized thresholded predicted mask
+            skeletonized_outputs = skeletonize(thresholded_outputs.cpu().numpy())
+            plt.subplot(num_rows, num_cols, i * num_cols + col_index + 1)
+            plt.imshow(skeletonized_outputs, cmap="gray")
+            plt.title("Skeletonized Predicted Mask")
             plt.axis("off")
             col_index += 1
 
