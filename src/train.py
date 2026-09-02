@@ -198,9 +198,9 @@ def get_loaders(
         mask_files=train_mask_files,
         vmin=vmin,
         vmax=vmax,
-        augment_flip_rot=True,
-        augment_scale=True,
-        augment_max_zoom_percentage=0.1,
+        augment_flip_rot=AUGMENTATION_FLIP_ROT,
+        augment_scale=AUGMENTATION_SCALE,
+        augment_max_zoom_percentage=AUGMENTATION_SCALE_MAX_ZOOM_PERCENTAGE,
         resize_to_size=resize_to_size,
     )
     val_dataset = SegmentationDataset(
@@ -210,7 +210,7 @@ def get_loaders(
         vmax=vmax,
         augment_flip_rot=False,
         augment_scale=False,
-        augment_max_zoom_percentage=0.1,
+        augment_max_zoom_percentage=AUGMENTATION_SCALE_MAX_ZOOM_PERCENTAGE,
         resize_to_size=resize_to_size,
     )
 
