@@ -262,7 +262,7 @@ def validate(
     dataloader: DataLoader,
     criterion: torch.nn.Module,
     device: torch.device,
-):
+) -> float:
     model.eval()  # set the model to evaluation mode
     running_loss = 0.0
 
@@ -277,6 +277,40 @@ def validate(
 
     epoch_loss = running_loss / len(dataloader.dataset)  # average loss for this epoch
     return epoch_loss
+
+
+@torch.no_grad()  # disable gradient calculation for validation
+def validate_dice(
+    model: torch.nn.Module,
+    dataloader: DataLoader,
+    device: torch.device,
+    confidence_threshold: float = 0.5,
+    eps: float = 1e-6,
+) -> float:
+    model.eval()
+    dice_total = 0.0
+    num_images = 0
+
+    for images, targets in dataloader:
+        images = images.to(device)
+        targets = targets.to(device)
+
+        probabilities = torch.sigmoid(model(images))  # convert logits to probabilities
+        predictions = (
+            probabilities > confidence_threshold
+        ).float()  # threshold the probabilities to get binary predictions
+
+        # compute dice
+        predictions = predictions.flatten(1)  # flatten the tensor - ie from [B, C, H, W] to [B, C*H*W]
+        targets = targets.flatten(1)
+
+        intersection = (predictions * targets).sum(1)
+        union = predictions.sum(1) + targets.sum(1)
+        dice = (2.0 * intersection + eps) / (union + eps)  # dice score for each image in the batch
+        dice_total += dice.sum().item()  # .item() is to convert the tensor to a python float
+        num_images += images.size(0)
+
+    return 1.0 - (dice_total / num_images)  # average dice score over the dataset
 
 
 def zoom_and_shift(
@@ -506,18 +540,19 @@ def main():
         train_loss = train_one_epoch(model, train_loader, weighted_criterion, optimiser, DEVICE)
         weighted_val_loss = validate(model, val_loader, weighted_criterion, DEVICE)
         unweighted_val_loss = validate(model, val_loader, unweighted_criterion, DEVICE)
+        val_dice_score = validate_dice(model, val_loader, DEVICE, confidence_threshold=0.5)
 
         # step the LR scheduler with the validation loss
         scheduler.step(weighted_val_loss)
         current_lr = optimiser.param_groups[0]["lr"]
 
         print(
-            f"Epoch [{epoch+1}/{EPOCHS}] - Train Loss: {train_loss:.4f}, Weighted Loss: {weighted_val_loss:.4f}, Unweighted Loss: {unweighted_val_loss:.4f}, LR: {current_lr:.6f}"
+            f"Epoch [{epoch+1}/{EPOCHS}] - Train Loss: {train_loss:.4f}, Weighted Loss: {weighted_val_loss:.4f}, Unweighted Loss: {unweighted_val_loss:.4f}, Dice Score: {val_dice_score:.4f}, LR: {current_lr:.6f}"
         )
 
         # save checkpoint if it's the best so far
-        if weighted_val_loss < best_val_loss:
-            best_val_loss = weighted_val_loss
+        if val_dice_score < best_val_loss:
+            best_val_loss = val_dice_score
             torch.save(model.state_dict(), MODEL_SAVE_PATH)
             print(f"Saved best model with val loss: {best_val_loss:.4f}")
 
@@ -545,7 +580,8 @@ def main():
     model.load_state_dict(torch.load(MODEL_SAVE_PATH))
     weighted_val_loss = validate(model, val_loader, weighted_criterion, DEVICE)
     print(f"Best model validation loss: {weighted_val_loss:.4f}")
-
+    val_dice_score = validate_dice(model, val_loader, DEVICE, confidence_threshold=0.5)
+    print(f"Best model validation dice score: {val_dice_score:.4f}")
     # Plot some predictions from the validation set
     model.eval()
     with torch.no_grad():
