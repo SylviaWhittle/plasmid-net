@@ -540,20 +540,57 @@ def main():
         train_loss = train_one_epoch(model, train_loader, weighted_criterion, optimiser, DEVICE)
         weighted_val_loss = validate(model, val_loader, weighted_criterion, DEVICE)
         unweighted_val_loss = validate(model, val_loader, unweighted_criterion, DEVICE)
-        val_dice_score = validate_dice(model, val_loader, DEVICE, confidence_threshold=0.5)
+        val_dice_loss = validate_dice(model, val_loader, DEVICE, confidence_threshold=0.5)
 
         # step the LR scheduler with the validation loss
         scheduler.step(weighted_val_loss)
         current_lr = optimiser.param_groups[0]["lr"]
 
         print(
-            f"Epoch [{epoch+1}/{EPOCHS}] - Train Loss: {train_loss:.4f}, Weighted Loss: {weighted_val_loss:.4f}, Unweighted Loss: {unweighted_val_loss:.4f}, Dice Score: {val_dice_score:.4f}, LR: {current_lr:.6f}"
+            f"Epoch [{epoch+1}/{EPOCHS}] - Train Loss: {train_loss:.4f}, Weighted Loss: {weighted_val_loss:.4f}, Unweighted Loss: {unweighted_val_loss:.4f}, Dice Loss: {val_dice_loss:.4f}, LR: {current_lr:.6f}"
         )
 
         # save checkpoint if it's the best so far
-        if val_dice_score < best_val_loss:
-            best_val_loss = val_dice_score
-            torch.save(model.state_dict(), MODEL_SAVE_PATH)
+        if val_dice_loss < best_val_loss:
+            best_val_loss = val_dice_loss
+
+            checkpoint = {
+                # the model parameters (weights and biases)
+                "model_state_dict": model.state_dict(),
+                # the optimiser state (including learning rate, momentum etc)
+                "optimiser_state_dict": optimiser.state_dict(),
+                # the scheduler state (including learning rate, momentum etc) - different from optimiser state dict
+                "scheduler_state_dict": scheduler.state_dict(),
+                "epoch": epoch,
+                "best_val_loss": best_val_loss,
+                "hyperparameters": {
+                    "batch_size": BATCH_SIZE,
+                    "epochs": EPOCHS,
+                    "learning_rate": LEARNING_RATE,
+                    "in_channels": IN_CHANNELS,
+                    "out_channels": OUT_CHANNELS,
+                    "vmin": VMIN,
+                    "vmax": VMAX,
+                    "resize_to_size": RESIZE_TO_SIZE,
+                    "augmentation_flip_rot": AUGMENTATION_FLIP_ROT,
+                    "augmentation_scale": AUGMENTATION_SCALE,
+                    "augmentation_scale_max_zoom_percentage": AUGMENTATION_SCALE_MAX_ZOOM_PERCENTAGE,
+                    "extra_channels_hessian": EXTRA_CHANNELS_HESSIAN,
+                    "extra_channels_hessian_normalised": EXTRA_CHANNELS_HESSIAN_NORMALISED,
+                    "extra_channels_hessian_sigmas": EXTRA_CHANNELS_HESSIAN_SIGMAS,
+                    "eval_height_threshold": EVAL_HEIGHT_THRESHOLD,
+                },
+                "data": {
+                    "sample_types": SAMPLE_TYPES,
+                    "num_samples_per_type": NUM_SAMPLES_PER_TYPE,
+                },
+                "misc": {
+                    "seed": SEED,
+                    "device": str(DEVICE),
+                },
+            }
+
+            torch.save(checkpoint, MODEL_SAVE_PATH)
             print(f"Saved best model with val loss: {best_val_loss:.4f}")
 
     print("\n--- Training complete ---\n")
@@ -577,11 +614,14 @@ def main():
     print(f"    - Scale: {AUGMENTATION_SCALE}")
 
     # Load the best model and evaluate on the validation set
-    model.load_state_dict(torch.load(MODEL_SAVE_PATH))
+    checkpoint = torch.load(MODEL_SAVE_PATH, map_location=DEVICE)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.to(DEVICE)
+    model.eval()
     weighted_val_loss = validate(model, val_loader, weighted_criterion, DEVICE)
     print(f"Best model validation loss: {weighted_val_loss:.4f}")
-    val_dice_score = validate_dice(model, val_loader, DEVICE, confidence_threshold=0.5)
-    print(f"Best model validation dice score: {val_dice_score:.4f}")
+    val_dice_loss = validate_dice(model, val_loader, DEVICE, confidence_threshold=0.5)
+    print(f"Best model validation dice score: {val_dice_loss:.4f}")
     # Plot some predictions from the validation set
     model.eval()
     with torch.no_grad():
