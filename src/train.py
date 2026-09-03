@@ -481,7 +481,19 @@ def main():
 
     # initialise model, loss function, and optimiser
     model = ResUNet(in_channels=IN_CHANNELS, out_channels=OUT_CHANNELS).to(DEVICE)
-    criterion = BCEWithLogitsDiceLoss(bce_weight=0.5)
+    # criterion = BCEWithLogitsDiceLoss(bce_weight=0.5)
+    # add positive weighting
+    positive_pixels = 0
+    negative_pixels = 0
+    for mask_path in train_mask_files:
+        mask = np.load(mask_path).astype(bool)
+        positive_pixels += np.sum(mask)
+        negative_pixels += np.sum(~mask)
+    positive_weight = negative_pixels / max(positive_pixels, 1)
+    weighted_criterion = BCEWithLogitsDiceLoss(
+        pos_weight=torch.tensor([positive_weight], dtype=torch.float32, device=DEVICE)
+    )
+    unweighted_criterion = BCEWithLogitsDiceLoss(pos_weight=None)
     # use adam since using batchnorm and relu
     optimiser = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     # Gradually drop the learning rate if the validation loss plateaus
@@ -491,20 +503,21 @@ def main():
 
     print("\n--- Starting training ---\n")
     for epoch in range(EPOCHS):
-        train_loss = train_one_epoch(model, train_loader, criterion, optimiser, DEVICE)
-        val_loss = validate(model, val_loader, criterion, DEVICE)
+        train_loss = train_one_epoch(model, train_loader, weighted_criterion, optimiser, DEVICE)
+        weighted_val_loss = validate(model, val_loader, weighted_criterion, DEVICE)
+        unweighted_val_loss = validate(model, val_loader, unweighted_criterion, DEVICE)
 
         # step the LR scheduler with the validation loss
-        scheduler.step(val_loss)
+        scheduler.step(weighted_val_loss)
         current_lr = optimiser.param_groups[0]["lr"]
 
         print(
-            f"Epoch [{epoch+1}/{EPOCHS}] - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, LR: {current_lr:.6f}"
+            f"Epoch [{epoch+1}/{EPOCHS}] - Train Loss: {train_loss:.4f}, Weighted Loss: {weighted_val_loss:.4f}, Unweighted Loss: {unweighted_val_loss:.4f}, LR: {current_lr:.6f}"
         )
 
         # save checkpoint if it's the best so far
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if weighted_val_loss < best_val_loss:
+            best_val_loss = weighted_val_loss
             torch.save(model.state_dict(), MODEL_SAVE_PATH)
             print(f"Saved best model with val loss: {best_val_loss:.4f}")
 
@@ -530,8 +543,8 @@ def main():
 
     # Load the best model and evaluate on the validation set
     model.load_state_dict(torch.load(MODEL_SAVE_PATH))
-    val_loss = validate(model, val_loader, criterion, DEVICE)
-    print(f"Best model validation loss: {val_loss:.4f}")
+    weighted_val_loss = validate(model, val_loader, weighted_criterion, DEVICE)
+    print(f"Best model validation loss: {weighted_val_loss:.4f}")
 
     # Plot some predictions from the validation set
     model.eval()

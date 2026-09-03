@@ -91,9 +91,9 @@ def dice_loss(logits, target, eps=1e-6):
 class BCEWithLogitsDiceLoss(nn.Module):
     """Combined BCE with logits and Dice loss."""
 
-    def __init__(self, bce_weight=0.5):
+    def __init__(self, bce_weight=0.5, pos_weight=None):
         super().__init__()
-        self.bce = nn.BCEWithLogitsLoss()
+        self.bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         self.bce_weight = bce_weight
 
     def forward(self, logits, target):
