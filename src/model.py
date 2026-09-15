@@ -1,4 +1,4 @@
-"""ResUnet model for image segmentation."""
+"""Script for generic loading of the model - for the API."""
 
 import torch
 import torch.nn as nn
@@ -117,3 +117,23 @@ class ResUNet(nn.Module):
         # final output layer
         out = self.final_conv(dec1)  # apply the final conv layer to get the desired number of output channels
         return out
+
+
+def create_model(config: dict) -> torch.nn.Module:
+    """
+    Create a model based on the provided configuration.
+
+    Parameters
+    ----------
+    config : dict
+        The configuration dictionary containing model parameters.
+
+    Returns
+    -------
+    torch.nn.Module
+        The created model.
+    """
+    return ResUNet(
+        in_channels=config["in_channels"],
+        out_channels=config["out_channels"],
+    )
