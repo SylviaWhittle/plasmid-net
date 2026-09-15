@@ -1,5 +1,7 @@
 """Scripts for training the model."""
 
+from pydantic import BaseModel, model_validator
+from datetime import datetime
 import random
 from pathlib import Path
 import torch
@@ -11,6 +13,8 @@ import matplotlib.pyplot as plt
 from skimage.filters import hessian
 from skimage.morphology import skeletonize
 
+from ruamel.yaml import YAML
+
 from src.resunet import ResUNet
 from src.loss import BCEWithLogitsDiceLoss
 
@@ -20,38 +24,69 @@ elif torch.backends.mps.is_available():
     DEVICE = torch.device("mps")
 else:
     DEVICE = torch.device("cpu")
-BATCH_SIZE = 8
-EPOCHS = 50
-LEARNING_RATE = 1e-4
-MODEL_SAVE_PATH = "resunet_model.pth"
-BASE_DIR = Path("/Users/sylvi/topo_data/dna-damage-unet")
-PREDICTIONS_DIR = BASE_DIR / "predictions"
-PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)  # create the directory if it doesn't exist
 
-SAMPLE_TYPES = ["cesium"]
 
-NUM_SAMPLES_PER_TYPE = [1000]
-SEED = 0
-TRAINING_DATA_DIR = BASE_DIR / "data"
-ALLOW_TOO_FEW_SAMPLES = True
-AUGMENTATION_FLIP_ROT = True
-AUGMENTATION_SCALE = False
-AUGMENTATION_SCALE_MAX_ZOOM_PERCENTAGE = 0.2
+class ConfigNormalisation(BaseModel):
+    """Dataclass for storing the normalisation configuration."""
 
-EXTRA_CHANNELS_HESSIAN = False  # whether to add hessian channel to the input images
-EXTRA_CHANNELS_HESSIAN_SIGMAS = [3.0]  # list of sigmas to use for the hessian filter
-EXTRA_CHANNELS_HESSIAN_NORMALISED = True
+    vmin: float
+    vmax: float
 
-RESIZE_TO_SIZE = 256  # resize images and masks to this size for training and validation
-# normalisation values for the images
-VMIN = -1.0
-VMAX = 5.0
 
-IN_CHANNELS = 1 + len(EXTRA_CHANNELS_HESSIAN_SIGMAS) if EXTRA_CHANNELS_HESSIAN else 1
-OUT_CHANNELS = 1
+class ConfigAugmentation(BaseModel):
+    """Dataclass for storing the augmentation configuration."""
 
-# eval
-EVAL_HEIGHT_THRESHOLD = (1.1 - VMIN) / (VMAX - VMIN)  # threshold for classical height-based thresholding
+    flip_rotate: bool
+    scale: bool
+    scale_max_zoom_percentage: float
+
+
+class ConfigExtraChannelsHessian(BaseModel):
+    """Dataclass for storing the extra channels configuration."""
+
+    enabled: bool
+    sigmas: list[float]
+    normalised: bool
+
+
+class ConfigExtraChannels(BaseModel):
+    """Dataclass for storing the extra channels configuration."""
+
+    hessian: ConfigExtraChannelsHessian
+
+
+class ConfigEvaluation(BaseModel):
+    """Dataclass for storing the evaluation configuration."""
+
+    classical_threshold: float
+
+
+class ConfigTrain(BaseModel):
+    """Dataclass for storing the configuration."""
+
+    batch_size: int
+    epochs: int
+    learning_rate: float
+    path_model_save: Path
+    path_base: Path
+    model_input_size: int
+    normalisation: ConfigNormalisation
+    sample_types: list[str]
+    num_samples_per_type: list[int]
+    allow_too_few_samples: bool
+    random_seed: int
+    augmentation: ConfigAugmentation
+    extra_channels: ConfigExtraChannels
+    evaluation: ConfigEvaluation
+
+    @model_validator(mode="after")
+    def validate_sample_counts(self):
+        # check that the number of sample types matches the number of sample counts
+        if len(self.sample_types) != len(self.num_samples_per_type):
+            raise ValueError(
+                f"Number of sample types ({len(self.sample_types)}) does not match number of sample counts ({len(self.num_samples_per_type)})"
+            )
+        return self
 
 
 def seed_everything(seed: int) -> None:
@@ -162,6 +197,8 @@ def get_loaders(
     batch_size: int,
     vmin: float,
     vmax: float,
+    config_augmentation: ConfigAugmentation,
+    config_extra_channels: ConfigExtraChannels,
     resize_to_size: int | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     """
@@ -181,8 +218,11 @@ def get_loaders(
         Minimum value for normalising the images.
     vmax : float
         Maximum value for normalising the images.
+    config_augmentation : ConfigAugmentation
+        Configuration for data augmentation.
     resize_to_size : int | None, optional
         Resize images and masks to this size, by default None (no resizing).
+
 
     Returns
     -------
@@ -198,10 +238,13 @@ def get_loaders(
         mask_files=train_mask_files,
         vmin=vmin,
         vmax=vmax,
-        augment_flip_rot=AUGMENTATION_FLIP_ROT,
-        augment_scale=AUGMENTATION_SCALE,
-        augment_max_zoom_percentage=AUGMENTATION_SCALE_MAX_ZOOM_PERCENTAGE,
+        augment_flip_rot=config_augmentation.flip_rotate,
+        augment_scale=config_augmentation.scale,
+        augment_max_zoom_percentage=config_augmentation.scale_max_zoom_percentage,
         resize_to_size=resize_to_size,
+        hessian=config_extra_channels.hessian.enabled,
+        hessian_sigmas=config_extra_channels.hessian.sigmas,
+        hessian_normalised=config_extra_channels.hessian.normalised,
     )
     val_dataset = SegmentationDataset(
         image_files=val_image_files,
@@ -210,8 +253,11 @@ def get_loaders(
         vmax=vmax,
         augment_flip_rot=False,
         augment_scale=False,
-        augment_max_zoom_percentage=AUGMENTATION_SCALE_MAX_ZOOM_PERCENTAGE,
+        augment_max_zoom_percentage=config_augmentation.scale_max_zoom_percentage,
         resize_to_size=resize_to_size,
+        hessian=config_extra_channels.hessian.enabled,
+        hessian_sigmas=config_extra_channels.hessian.sigmas,
+        hessian_normalised=config_extra_channels.hessian.normalised,
     )
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -392,6 +438,9 @@ class SegmentationDataset(torch.utils.data.Dataset):
         augment_scale: bool,
         augment_max_zoom_percentage: float,
         resize_to_size: int | None,
+        hessian: bool,
+        hessian_sigmas: list[float],
+        hessian_normalised: bool,
     ) -> None:
         """Initialise."""
         self.image_files = image_files
@@ -402,6 +451,9 @@ class SegmentationDataset(torch.utils.data.Dataset):
         self.augment_scale = augment_scale
         self.augment_max_zoom_percentage = augment_max_zoom_percentage
         self.resize_to_size = resize_to_size
+        self.hessian = hessian
+        self.hessian_sigmas = hessian_sigmas
+        self.hessian_normalised = hessian_normalised
 
     def __len__(self) -> int:
         """Return the length of the dataset."""
@@ -448,12 +500,12 @@ class SegmentationDataset(torch.utils.data.Dataset):
         # add channel dimension to the image tensor
         image = image.unsqueeze(0)  # [C, H, W]
 
-        if EXTRA_CHANNELS_HESSIAN:
+        if self.hessian:
             # Add hessian channel to the image tensor for better feature extraction
             # Calculate the hessian before normalising the image
             image_hessian = hessian(
                 image=image_original.squeeze(0).numpy(),
-                sigmas=EXTRA_CHANNELS_HESSIAN_SIGMAS,
+                sigmas=self.hessian_sigmas,
                 mode="reflect",
                 # beta = 0.1,
                 # scale_step = 1.0,
@@ -463,7 +515,7 @@ class SegmentationDataset(torch.utils.data.Dataset):
             # put it into the image tensor
             image_hessian = torch.from_numpy(image_hessian).float().unsqueeze(0)  # [C, H, W]
             # normalise the hessian channel if needed
-            if EXTRA_CHANNELS_HESSIAN_NORMALISED:
+            if self.hessian_normalised:
                 image_hessian = torch.clamp(image_hessian, self.vmin, self.vmax)
                 image_hessian = (image_hessian - self.vmin) / (self.vmax - self.vmin)
             # concatenate the hessian channel to the image tensor
@@ -491,15 +543,34 @@ class SegmentationDataset(torch.utils.data.Dataset):
         return image, mask
 
 
-def main():
+def load_config(config_path: Path) -> ConfigTrain:
+    """Load the configuration from a YAML file."""
+    with open(config_path, "r") as file:
+        yaml = YAML(typ="safe")
+        config_dict = yaml.load(file)
+    return ConfigTrain.model_validate(config_dict)
 
-    seed_everything(SEED)
+
+def main(config_path: Path):
+    """Main function for training the model."""
+
+    # Load the configuration
+    config = load_config(config_path)
+
+    seed_everything(config.random_seed)
+
+    path_base = config.path_base
+    path_train_data = path_base / "data"
+    path_predictions = path_base / "predictions"
+    sample_types = config.sample_types
+    in_channels = 1 + len(config.extra_channels.hessian.sigmas) if config.extra_channels.hessian.enabled else 1
+    out_channels = 1  # hardcoded binary segmentation for now
 
     # Grab samples from directories for each sample type
     train_image_files, train_mask_files, num_samples_used = sample_type_split(
-        sample_type_dirs=[TRAINING_DATA_DIR / sample_type for sample_type in SAMPLE_TYPES],
-        num_samples_per_type=NUM_SAMPLES_PER_TYPE,
-        allow_too_few_samples=ALLOW_TOO_FEW_SAMPLES,
+        sample_type_dirs=[path_train_data / sample_type for sample_type in sample_types],
+        num_samples_per_type=config.num_samples_per_type,
+        allow_too_few_samples=config.allow_too_few_samples,
     )
 
     # get data loaders
@@ -507,14 +578,16 @@ def main():
         images_paths=train_image_files,
         masks_paths=train_mask_files,
         val_split=0.2,
-        batch_size=BATCH_SIZE,
-        vmin=VMIN,
-        vmax=VMAX,
-        resize_to_size=RESIZE_TO_SIZE,
+        batch_size=config.batch_size,
+        vmin=config.normalisation.vmin,
+        vmax=config.normalisation.vmax,
+        config_augmentation=config.augmentation,
+        config_extra_channels=config.extra_channels,
+        resize_to_size=config.model_input_size,
     )
 
     # initialise model, loss function, and optimiser
-    model = ResUNet(in_channels=IN_CHANNELS, out_channels=OUT_CHANNELS).to(DEVICE)
+    model = ResUNet(in_channels=in_channels, out_channels=out_channels).to(DEVICE)
     # criterion = BCEWithLogitsDiceLoss(bce_weight=0.5)
     # add positive weighting
     positive_pixels = 0
@@ -529,14 +602,17 @@ def main():
     )
     unweighted_criterion = BCEWithLogitsDiceLoss(pos_weight=None)
     # use adam since using batchnorm and relu
-    optimiser = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optimiser = optim.Adam(model.parameters(), lr=config.learning_rate)
     # Gradually drop the learning rate if the validation loss plateaus
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimiser, mode="min", factor=0.5, patience=3)
 
     best_val_loss = float("inf")
 
+    start_time = datetime.now()
+
     print("\n--- Starting training ---\n")
-    for epoch in range(EPOCHS):
+    best_epoch: int = -1
+    for epoch in range(config.epochs):
         train_loss = train_one_epoch(model, train_loader, weighted_criterion, optimiser, DEVICE)
         weighted_val_loss = validate(model, val_loader, weighted_criterion, DEVICE)
         unweighted_val_loss = validate(model, val_loader, unweighted_criterion, DEVICE)
@@ -547,12 +623,12 @@ def main():
         current_lr = optimiser.param_groups[0]["lr"]
 
         print(
-            f"Epoch [{epoch+1}/{EPOCHS}] - Train Loss: {train_loss:.4f}, Weighted Loss: {weighted_val_loss:.4f}, Unweighted Loss: {unweighted_val_loss:.4f}, Dice Loss: {val_dice_loss:.4f}, LR: {current_lr:.6f}"
+            f"Epoch [{epoch+1}/{config.epochs}] - Train Loss: {train_loss:.4f}, Weighted Loss: {weighted_val_loss:.4f}, Unweighted Loss: {unweighted_val_loss:.4f}, Dice Loss: {val_dice_loss:.4f}, LR: {current_lr:.6f}"
         )
-
-        # save checkpoint if it's the best so far
+        # Check if the validation loss is the best we've seen so far, and if so, save a model checkpoint
         if val_dice_loss < best_val_loss:
             best_val_loss = val_dice_loss
+            best_epoch = epoch
 
             checkpoint = {
                 # the model parameters (weights and biases)
@@ -563,58 +639,36 @@ def main():
                 "scheduler_state_dict": scheduler.state_dict(),
                 "epoch": epoch,
                 "best_val_loss": best_val_loss,
-                "hyperparameters": {
-                    "batch_size": BATCH_SIZE,
-                    "epochs": EPOCHS,
-                    "learning_rate": LEARNING_RATE,
-                    "in_channels": IN_CHANNELS,
-                    "out_channels": OUT_CHANNELS,
-                    "vmin": VMIN,
-                    "vmax": VMAX,
-                    "resize_to_size": RESIZE_TO_SIZE,
-                    "augmentation_flip_rot": AUGMENTATION_FLIP_ROT,
-                    "augmentation_scale": AUGMENTATION_SCALE,
-                    "augmentation_scale_max_zoom_percentage": AUGMENTATION_SCALE_MAX_ZOOM_PERCENTAGE,
-                    "extra_channels_hessian": EXTRA_CHANNELS_HESSIAN,
-                    "extra_channels_hessian_normalised": EXTRA_CHANNELS_HESSIAN_NORMALISED,
-                    "extra_channels_hessian_sigmas": EXTRA_CHANNELS_HESSIAN_SIGMAS,
-                    "eval_height_threshold": EVAL_HEIGHT_THRESHOLD,
-                },
-                "data": {
-                    "sample_types": SAMPLE_TYPES,
-                    "num_samples_per_type": NUM_SAMPLES_PER_TYPE,
-                },
-                "misc": {
-                    "seed": SEED,
-                    "device": str(DEVICE),
-                },
+                "config": config.model_dump(mode="json"),  # save the config as a dictionary
+                # note that mode=json turns all Path objects to strings, which is what we want since
+                # pytorch doesn't know how to save Path objects.
             }
 
-            torch.save(checkpoint, MODEL_SAVE_PATH)
+            torch.save(checkpoint, config.path_model_save)
             print(f"Saved best model with val loss: {best_val_loss:.4f}")
+
+    end_time = datetime.now()
+    training_time = end_time - start_time
 
     print("\n--- Training complete ---\n")
     print(f"Best validation loss: {best_val_loss:.4f}")
     print("Training stats:")
     print(f"  - Device: {DEVICE}")
-    print(f"  - Seed: {SEED}")
-    print(f"  - Total epochs: {EPOCHS}")
-    print(f"  - Batch size: {BATCH_SIZE}")
-    print(f"  - Initial learning rate: {LEARNING_RATE}")
-    print(f"  - Model saved to: {MODEL_SAVE_PATH}")
-    print(f"  - Number of samples requested per type: {NUM_SAMPLES_PER_TYPE}")
+    print(f"  - Number of epochs: {config.epochs}")
+    print(f"  - Best epoch: {best_epoch + 1}")
+    print(f"  - Seed: {config.random_seed}")
+    print(f"  - Initial learning rate: {config.learning_rate}")
+    print(f"  - Model saved to: {config.path_model_save}")
+    print(f"  - Number of samples requested per type: {config.num_samples_per_type}")
     print(f"  - Number of samples actually used per type: {num_samples_used}")
-    print(f"  - Sample types: {SAMPLE_TYPES}")
-    print("  - Extra channels")
-    print(f"    - Hessian : {EXTRA_CHANNELS_HESSIAN}")
-    print(f"      - Hessian normalised : {EXTRA_CHANNELS_HESSIAN_NORMALISED}")
-    print(f"      - Hessian sigmas : {EXTRA_CHANNELS_HESSIAN_SIGMAS}")
-    print("  - Augmentation:")
-    print(f"    - Flip and rotate: {AUGMENTATION_FLIP_ROT}")
-    print(f"    - Scale: {AUGMENTATION_SCALE}")
+    print(f" - Training time: {training_time}")
+    # print the configuration from the config models
+    print("\nConfiguration:")
+    for key, value in config.model_dump().items():
+        print(f"  - {key}: {value}")
 
     # Load the best model and evaluate on the validation set
-    checkpoint = torch.load(MODEL_SAVE_PATH, map_location=DEVICE)
+    checkpoint = torch.load(config.path_model_save, map_location=DEVICE, weights_only=True)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(DEVICE)
     model.eval()
@@ -626,7 +680,7 @@ def main():
     model.eval()
     with torch.no_grad():
         num_rows = len(val_loader)
-        num_cols = IN_CHANNELS + OUT_CHANNELS * 2 + 1 + 1 + 1 + 1
+        num_cols = in_channels + out_channels * 2 + 1 + 1 + 1 + 1
         # input channels
         # target channels
         # classical threshold binary
@@ -652,7 +706,7 @@ def main():
             plt.axis("off")
             col_index += 1
 
-            if EXTRA_CHANNELS_HESSIAN:
+            if config.extra_channels.hessian.enabled:
                 # plot the hessian channel
                 plt.subplot(num_rows, num_cols, i * num_cols + col_index + 1)
                 plt.imshow(images[0, 1].cpu(), cmap="gray")
@@ -668,7 +722,7 @@ def main():
             col_index += 1
 
             # classical threshold binary mask
-            classical_threshold_mask = (images[0, 0] > EVAL_HEIGHT_THRESHOLD).float()
+            classical_threshold_mask = (images[0, 0] > config.evaluation.classical_threshold).float()
             plt.subplot(num_rows, num_cols, i * num_cols + col_index + 1)
             plt.imshow(classical_threshold_mask.cpu(), cmap="gray")
             plt.title("Threshold Binary Mask")
@@ -708,9 +762,9 @@ def main():
         plt.tight_layout()
         # save the figure
         # create a guid for the image based on index and epoch
-        image_guid = f"val_predictions_epoch_{EPOCHS}"
-        plt.savefig(PREDICTIONS_DIR / f"prediction_{image_guid}.png")
+        image_guid = f"val_predictions_epoch_{config.epochs}"
+        plt.savefig(path_predictions / f"prediction_{image_guid}.png")
 
 
 if __name__ == "__main__":
-    main()
+    main(config_path=Path("./training_config.yaml"))
