@@ -1,6 +1,7 @@
 """Scripts for training the model."""
 
-from shutil import copy2
+from coolname import generate_slug
+from shutil import copy2, get_terminal_size
 from pydantic import BaseModel, model_validator
 from datetime import datetime
 import random
@@ -16,8 +17,8 @@ from skimage.morphology import skeletonize
 
 from ruamel.yaml import YAML
 
-from src.model import create_model
-from src.loss import BCEWithLogitsDiceLoss
+from plasmid_net.model import create_model
+from plasmid_net.loss import BCEWithLogitsDiceLoss
 
 if torch.cuda.is_available():
     DEVICE = torch.device("cuda")
@@ -65,11 +66,14 @@ class ConfigEvaluation(BaseModel):
 class ConfigTrain(BaseModel):
     """Dataclass for storing the configuration."""
 
+    run_name: str
     batch_size: int
     epochs: int
     learning_rate: float
-    path_model_save: Path
     path_base: Path
+    path_data: Path
+    path_bundle_save_dir: Path
+    path_predictions: Path
     model_input_size: int
     normalisation: ConfigNormalisation
     sample_types: list[str]
@@ -566,7 +570,7 @@ def export_checkpoint_as_model_bundle(
     in_channels: int,
     out_channels: int,
     device: torch.device,
-) -> Path:
+) -> None:
     print(f"Exporting model bundle to {path_bundle_dir}...")
     path_bundle_dir.mkdir(parents=True, exist_ok=True)
 
@@ -603,11 +607,30 @@ def main(config_path: Path):
     # Load the configuration
     config = load_config(config_path)
 
+    if config.path_data.is_absolute() is False:
+        config.path_data = config.path_base / config.path_data
+        assert config.path_data.exists(), f"Data path {config.path_data} does not exist."
+    if config.path_bundle_save_dir.is_absolute() is False:
+        config.path_bundle_save_dir = config.path_base / config.path_bundle_save_dir
+        config.path_bundle_save_dir.mkdir(parents=True, exist_ok=True)
+    if config.path_predictions.is_absolute() is False:
+        config.path_predictions = config.path_base / config.path_predictions
+        config.path_predictions.mkdir(parents=True, exist_ok=True)
+
+    if config.run_name == "":
+        config.run_name = generate_slug(2)
+
+    path_bundle = config.path_bundle_save_dir / f"model_bundle_{config.run_name}"
+
+    # get terminal width for printing
+    terminal_width = get_terminal_size().columns
+    print("\n\n" + "=" * terminal_width)
+    print(f"Training run: {config.run_name}")
+
     seed_everything(config.random_seed)
 
-    path_base = config.path_base
-    path_train_data = path_base / "data"
-    path_predictions = path_base / "predictions"
+    path_train_data = config.path_data
+    path_predictions = config.path_predictions
     sample_types = config.sample_types
     in_channels = 1 + len(config.extra_channels.hessian.sigmas) if config.extra_channels.hessian.enabled else 1
     out_channels = 1  # hardcoded binary segmentation for now
@@ -685,7 +708,7 @@ def main(config_path: Path):
 
             export_checkpoint_as_model_bundle(
                 config=config,
-                path_bundle_dir=path_predictions / "model_bundle",
+                path_bundle_dir=path_bundle,
                 model=model,
                 optimiser=optimiser,
                 scheduler=scheduler,
@@ -712,7 +735,7 @@ def main(config_path: Path):
     print(f"  - Best epoch: {best_epoch + 1}")
     print(f"  - Seed: {config.random_seed}")
     print(f"  - Initial learning rate: {config.learning_rate}")
-    print(f"  - Model saved to: {config.path_model_save}")
+    print(f"  - Model saved to: {path_bundle}")
     print(f"  - Number of samples requested per type: {config.num_samples_per_type}")
     print(f"  - Number of samples actually used per type: {num_samples_used}")
     print(f" - Training time: {training_time}")
@@ -722,8 +745,8 @@ def main(config_path: Path):
         print(f"  - {key}: {value}")
 
     # Load the best model and evaluate on the validation set
-    checkpoint = torch.load(config.path_model_save, map_location=DEVICE, weights_only=True)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model_state_dict = torch.load(path_bundle / "model_state_dict.pth", map_location=DEVICE)
+    model.load_state_dict(model_state_dict)
     model.to(DEVICE)
     model.eval()
     weighted_val_loss = validate(model, val_loader, weighted_criterion, DEVICE)

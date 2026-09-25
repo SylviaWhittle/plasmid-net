@@ -1,16 +1,19 @@
 # config file for training a model for https://github.com/SylviaWhittle/plasmid-net
 # training data dir is base_dir / "data" with subdirs for each sample type
 batch_size: 8
-epochs: 10
+epochs: 50
 learning_rate: 1e-4
-path_model_save: "model-errant.pth"
+run_name: "" # blank for auto-generated name
 path_base: "/Users/sylvi/topo_data/dna-damage-unet/"
+path_data: "data"
+path_bundle_save_dir: "trained/"
+path_predictions: "trained/predictions"
 model_input_size: 256
 normalisation:
   vmin: -1.0
   vmax: 5.0
 sample_types: ["cesium"]
-num_samples_per_type: [50]
+num_samples_per_type: [1000]
 allow_too_few_samples: true
 random_seed: 0
 augmentation:
