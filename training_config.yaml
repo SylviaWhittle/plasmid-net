@@ -8,6 +8,7 @@ path_base: "/Users/sylvi/topo_data/dna-damage-unet/"
 path_data: "data"
 path_bundle_save_dir: "trained/"
 path_predictions: "trained/predictions"
+save_only_best_loss_model: false
 model_input_size: 256
 normalisation:
   vmin: -1.0

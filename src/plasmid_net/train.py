@@ -74,6 +74,7 @@ class ConfigTrain(BaseModel):
     path_data: Path
     path_bundle_save_dir: Path
     path_predictions: Path
+    save_only_best_loss_model: bool
     model_input_size: int
     normalisation: ConfigNormalisation
     sample_types: list[str]
@@ -685,7 +686,7 @@ def main(config_path: Path):
     start_time = datetime.now()
 
     print("\n--- Starting training ---\n")
-    best_epoch: int = -1
+    trained_epoch: int = -1
     for epoch in range(config.epochs):
         train_loss = train_one_epoch(model, train_loader, weighted_criterion, optimiser, DEVICE)
         weighted_val_loss = validate(model, val_loader, weighted_criterion, DEVICE)
@@ -702,7 +703,7 @@ def main(config_path: Path):
         # Check if the validation loss is the best we've seen so far, and if so, save a model checkpoint
         if val_dice_loss < best_val_loss:
             best_val_loss = val_dice_loss
-            best_epoch = epoch
+            trained_epoch = epoch
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             time_trained = datetime.now() - start_time
 
@@ -724,6 +725,27 @@ def main(config_path: Path):
 
             print(f"Saved best model with val loss: {best_val_loss:.4f}")
 
+    if not config.save_only_best_loss_model:
+        # save the final model after all epochs
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        time_trained = datetime.now() - start_time
+        export_checkpoint_as_model_bundle(
+            config=config,
+            path_bundle_dir=path_bundle,
+            model=model,
+            optimiser=optimiser,
+            scheduler=scheduler,
+            source_model_file=Path(__file__).parent / "model.py",
+            epoch=config.epochs - 1,
+            best_val_loss=best_val_loss,
+            timestamp=timestamp,
+            time_trained=str(time_trained),
+            in_channels=in_channels,
+            out_channels=out_channels,
+            device=DEVICE,
+        )
+        print(f"Saved final model after {config.epochs} epochs with val loss: {best_val_loss:.4f}")
+
     end_time = datetime.now()
     training_time = end_time - start_time
 
@@ -732,7 +754,7 @@ def main(config_path: Path):
     print("Training stats:")
     print(f"  - Device: {DEVICE}")
     print(f"  - Number of epochs: {config.epochs}")
-    print(f"  - Best epoch: {best_epoch + 1}")
+    print(f"  - Best epoch: {trained_epoch + 1}")
     print(f"  - Seed: {config.random_seed}")
     print(f"  - Initial learning rate: {config.learning_rate}")
     print(f"  - Model saved to: {path_bundle}")
@@ -749,10 +771,17 @@ def main(config_path: Path):
     model.load_state_dict(model_state_dict)
     model.to(DEVICE)
     model.eval()
+    training_metadata_path = path_bundle / "training_metadata.yaml"
+    assert training_metadata_path.exists(), f"Training metadata file {training_metadata_path} does not exist."
+    with open(training_metadata_path, "r") as file:
+        yaml = YAML(typ="safe")
+        training_metadata = yaml.load(file)
+    trained_epoch = training_metadata["epoch"]
+    print(f"\nLoaded model from epoch {trained_epoch + 1} for evaluation.")
     weighted_val_loss = validate(model, val_loader, weighted_criterion, DEVICE)
-    print(f"Best model validation loss: {weighted_val_loss:.4f}")
+    print(f"Model validation loss: {weighted_val_loss:.4f}")
     val_dice_loss = validate_dice(model, val_loader, DEVICE, confidence_threshold=0.5)
-    print(f"Best model validation dice score: {val_dice_loss:.4f}")
+    print(f"Model validation dice score: {val_dice_loss:.4f}")
     # Plot some predictions from the validation set
     model.eval()
     with torch.no_grad():
@@ -839,7 +868,7 @@ def main(config_path: Path):
         plt.tight_layout()
         # save the figure
         # create a guid for the image based on index and epoch
-        image_guid = f"val_predictions_epoch_{config.epochs}"
+        image_guid = f"val_predictions_{config.run_name}_epoch_{trained_epoch + 1}"
         plt.savefig(path_predictions / f"prediction_{image_guid}.png")
 
 
