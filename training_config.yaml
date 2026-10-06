@@ -19,7 +19,7 @@ allow_too_few_samples: true
 random_seed: 0
 augmentation:
   flip_rotate: true
-  scale: true
+  scale: false
   scale_max_zoom_percentage: 0.2
 extra_channels:
   hessian:
