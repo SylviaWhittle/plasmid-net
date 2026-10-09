@@ -1,15 +1,21 @@
 """Scripts for training the model."""
 
+from coolname import generate_slug
+from shutil import copy2
+from datetime import datetime
 import random
 from pathlib import Path
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from pydantic import BaseModel, model_validator
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 from skimage.filters import hessian
 from skimage.morphology import skeletonize
+
+from ruamel.yaml import YAML
 
 from src.resunet import ResUNet
 from src.loss import BCEWithLogitsDiceLoss
@@ -52,6 +58,73 @@ OUT_CHANNELS = 1
 
 # eval
 EVAL_HEIGHT_THRESHOLD = (1.1 - VMIN) / (VMAX - VMIN)  # threshold for classical height-based thresholding
+
+
+class ConfigNormalisation(BaseModel):
+    """Dataclass for storing the normalisation configuration."""
+
+    vmin: float
+    vmax: float
+
+
+class ConfigAugmentation(BaseModel):
+    """Dataclass for storing the augmentation configuration."""
+
+    flip_rotate: bool
+    scale: bool
+    scale_max_zoom_percentage: float
+
+
+class ConfigExtraChannelsHessian(BaseModel):
+    """Dataclass for storing the extra channels configuration."""
+
+    enabled: bool
+    sigmas: list[float]
+    normalised: bool
+
+
+class ConfigExtraChannels(BaseModel):
+    """Dataclass for storing the extra channels configuration."""
+
+    hessian: ConfigExtraChannelsHessian
+
+
+class ConfigEvaluation(BaseModel):
+    """Dataclass for storing the evaluation configuration."""
+
+    classical_threshold: float
+
+
+class ConfigTrain(BaseModel):
+    """Dataclass for storing the configuration."""
+
+    run_name: str
+    batch_size: int
+    epochs: int
+    learning_rate: float
+    path_base: Path
+    path_data: Path
+    path_bundle_save_dir: Path
+    path_predictions: Path
+    save_only_best_loss_model: bool
+    model_input_size: int
+    normalisation: ConfigNormalisation
+    sample_types: list[str]
+    num_samples_per_type: list[int]
+    allow_too_few_samples: bool
+    random_seed: int
+    augmentation: ConfigAugmentation
+    extra_channels: ConfigExtraChannels
+    evaluation: ConfigEvaluation
+
+    @model_validator(mode="after")
+    def validate_sample_counts(self):
+        # check that the number of sample types matches the number of sample counts
+        if len(self.sample_types) != len(self.num_samples_per_type):
+            raise ValueError(
+                f"Number of sample types ({len(self.sample_types)}) does not match number of sample counts ({len(self.num_samples_per_type)})"
+            )
+        return self
 
 
 def seed_everything(seed: int) -> None:
@@ -491,7 +564,62 @@ class SegmentationDataset(torch.utils.data.Dataset):
         return image, mask
 
 
+def load_config(config_path: Path) -> ConfigTrain:
+    """Load the configuration from a YAML file."""
+    with open(config_path, "r") as file:
+        yaml = YAML(typ="safe")
+        config_dict = yaml.load(file)
+    return ConfigTrain.model_validate(config_dict)
+
+
+def export_checkpoint_as_model_bundle(
+    config: ConfigTrain,
+    path_bundle_dir: Path,
+    model: torch.nn.Module,
+    optimiser: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler._LRScheduler,
+    source_model_file: Path,
+    epoch: int,
+    best_val_loss: float,
+    timestamp: str,
+    time_trained: str,
+    in_channels: int,
+    out_channels: int,
+    device: torch.device,
+) -> None:
+    print(f"Exporting model bundle to {path_bundle_dir}...")
+    path_bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    copy2(source_model_file, path_bundle_dir / "model.py")
+
+    # save the state dicts of the model, optimiser, and scheduler
+    torch.save(model.state_dict(), path_bundle_dir / "model_state_dict.pth")
+    torch.save(optimiser.state_dict(), path_bundle_dir / "optimiser_state_dict.pth")
+    torch.save(scheduler.state_dict(), path_bundle_dir / "scheduler_state_dict.pth")
+
+    # save the config as a yaml file
+    with open(path_bundle_dir / "config.yaml", "w") as file:
+        yaml = YAML()
+        yaml.dump(config.model_dump(mode="json"), file)
+
+    # save the training metadata as a yaml file
+    training_metadata = {
+        "epoch": epoch,
+        "best_val_loss": best_val_loss,
+        "timestamp": timestamp,
+        "time_trained": str(time_trained),
+        "in_channels": in_channels,
+        "out_channels": out_channels,
+        "device": str(device),
+    }
+    with open(path_bundle_dir / "training_metadata.yaml", "w") as file:
+        yaml = YAML()
+        yaml.dump(training_metadata, file)
+
+
 def main():
+
+    config: ConfigTrain = load_config("./training_config.yaml")
 
     seed_everything(SEED)
 
@@ -501,6 +629,14 @@ def main():
         num_samples_per_type=NUM_SAMPLES_PER_TYPE,
         allow_too_few_samples=ALLOW_TOO_FEW_SAMPLES,
     )
+
+    # save the train image files and train mask files to a text file for testing
+    with open(BASE_DIR / "train_image_files_old.txt", "w") as f:
+        for item in train_image_files:
+            f.write(f"{item}\n")
+    with open(BASE_DIR / "train_mask_files_old.txt", "w") as f:
+        for item in train_mask_files:
+            f.write(f"{item}\n")
 
     # get data loaders
     train_loader, val_loader = get_loaders(
@@ -535,6 +671,8 @@ def main():
 
     best_val_loss = float("inf")
 
+    start_time = datetime.now()
+
     print("\n--- Starting training ---\n")
     for epoch in range(EPOCHS):
         train_loss = train_one_epoch(model, train_loader, weighted_criterion, optimiser, DEVICE)
@@ -554,44 +692,62 @@ def main():
         if val_dice_loss < best_val_loss:
             best_val_loss = val_dice_loss
 
-            checkpoint = {
-                # the model parameters (weights and biases)
-                "model_state_dict": model.state_dict(),
-                # the optimiser state (including learning rate, momentum etc)
-                "optimiser_state_dict": optimiser.state_dict(),
-                # the scheduler state (including learning rate, momentum etc) - different from optimiser state dict
-                "scheduler_state_dict": scheduler.state_dict(),
-                "epoch": epoch,
-                "best_val_loss": best_val_loss,
-                "hyperparameters": {
-                    "batch_size": BATCH_SIZE,
-                    "epochs": EPOCHS,
-                    "learning_rate": LEARNING_RATE,
-                    "in_channels": IN_CHANNELS,
-                    "out_channels": OUT_CHANNELS,
-                    "vmin": VMIN,
-                    "vmax": VMAX,
-                    "resize_to_size": RESIZE_TO_SIZE,
-                    "augmentation_flip_rot": AUGMENTATION_FLIP_ROT,
-                    "augmentation_scale": AUGMENTATION_SCALE,
-                    "augmentation_scale_max_zoom_percentage": AUGMENTATION_SCALE_MAX_ZOOM_PERCENTAGE,
-                    "extra_channels_hessian": EXTRA_CHANNELS_HESSIAN,
-                    "extra_channels_hessian_normalised": EXTRA_CHANNELS_HESSIAN_NORMALISED,
-                    "extra_channels_hessian_sigmas": EXTRA_CHANNELS_HESSIAN_SIGMAS,
-                    "eval_height_threshold": EVAL_HEIGHT_THRESHOLD,
-                },
-                "data": {
-                    "sample_types": SAMPLE_TYPES,
-                    "num_samples_per_type": NUM_SAMPLES_PER_TYPE,
-                },
-                "misc": {
-                    "seed": SEED,
-                    "device": str(DEVICE),
-                },
-            }
+            # checkpoint = {
+            #     # the model parameters (weights and biases)
+            #     "model_state_dict": model.state_dict(),
+            #     # the optimiser state (including learning rate, momentum etc)
+            #     "optimiser_state_dict": optimiser.state_dict(),
+            #     # the scheduler state (including learning rate, momentum etc) - different from optimiser state dict
+            #     "scheduler_state_dict": scheduler.state_dict(),
+            #     "epoch": epoch,
+            #     "best_val_loss": best_val_loss,
+            #     "hyperparameters": {
+            #         "batch_size": BATCH_SIZE,
+            #         "epochs": EPOCHS,
+            #         "learning_rate": LEARNING_RATE,
+            #         "in_channels": IN_CHANNELS,
+            #         "out_channels": OUT_CHANNELS,
+            #         "vmin": VMIN,
+            #         "vmax": VMAX,
+            #         "resize_to_size": RESIZE_TO_SIZE,
+            #         "augmentation_flip_rot": AUGMENTATION_FLIP_ROT,
+            #         "augmentation_scale": AUGMENTATION_SCALE,
+            #         "augmentation_scale_max_zoom_percentage": AUGMENTATION_SCALE_MAX_ZOOM_PERCENTAGE,
+            #         "extra_channels_hessian": EXTRA_CHANNELS_HESSIAN,
+            #         "extra_channels_hessian_normalised": EXTRA_CHANNELS_HESSIAN_NORMALISED,
+            #         "extra_channels_hessian_sigmas": EXTRA_CHANNELS_HESSIAN_SIGMAS,
+            #         "eval_height_threshold": EVAL_HEIGHT_THRESHOLD,
+            #     },
+            #     "data": {
+            #         "sample_types": SAMPLE_TYPES,
+            #         "num_samples_per_type": NUM_SAMPLES_PER_TYPE,
+            #     },
+            #     "misc": {
+            #         "seed": SEED,
+            #         "device": str(DEVICE),
+            #     },
+            # }
 
-            torch.save(checkpoint, MODEL_SAVE_PATH)
-            print(f"Saved best model with val loss: {best_val_loss:.4f}")
+            # torch.save(checkpoint, MODEL_SAVE_PATH)
+            # print(f"Saved best model with val loss: {best_val_loss:.4f}")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            time_trained = str(datetime.now() - start_time)
+
+            export_checkpoint_as_model_bundle(
+                config=config,
+                path_bundle_dir=Path("./model_bundle_attempt_parity"),
+                model=model,
+                optimiser=optimiser,
+                scheduler=scheduler,
+                source_model_file=Path(__file__).parent / "resunet.py",
+                epoch=epoch,
+                best_val_loss=best_val_loss,
+                timestamp=timestamp,
+                time_trained=time_trained,
+                in_channels=IN_CHANNELS,
+                out_channels=OUT_CHANNELS,
+                device=DEVICE,
+            )
 
     print("\n--- Training complete ---\n")
     print(f"Best validation loss: {best_val_loss:.4f}")
@@ -601,7 +757,7 @@ def main():
     print(f"  - Total epochs: {EPOCHS}")
     print(f"  - Batch size: {BATCH_SIZE}")
     print(f"  - Initial learning rate: {LEARNING_RATE}")
-    print(f"  - Model saved to: {MODEL_SAVE_PATH}")
+    print(f"  - Model saved to: {"XXXX"}")
     print(f"  - Number of samples requested per type: {NUM_SAMPLES_PER_TYPE}")
     print(f"  - Number of samples actually used per type: {num_samples_used}")
     print(f"  - Sample types: {SAMPLE_TYPES}")
@@ -613,9 +769,11 @@ def main():
     print(f"    - Flip and rotate: {AUGMENTATION_FLIP_ROT}")
     print(f"    - Scale: {AUGMENTATION_SCALE}")
 
+    # load the model
+    model = ResUNet(in_channels=IN_CHANNELS, out_channels=OUT_CHANNELS).to(DEVICE)
     # Load the best model and evaluate on the validation set
-    checkpoint = torch.load(MODEL_SAVE_PATH, map_location=DEVICE)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    checkpoint = torch.load(Path("./model_bundle_attempt_parity") / "model_state_dict.pth", map_location=DEVICE)
+    model.load_state_dict(checkpoint)
     model.to(DEVICE)
     model.eval()
     weighted_val_loss = validate(model, val_loader, weighted_criterion, DEVICE)
