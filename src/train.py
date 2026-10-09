@@ -1,7 +1,7 @@
 """Scripts for training the model."""
 
 from coolname import generate_slug
-from shutil import copy2
+from shutil import copy2, get_terminal_size
 from datetime import datetime
 import random
 from pathlib import Path
@@ -235,6 +235,8 @@ def get_loaders(
     batch_size: int,
     vmin: float,
     vmax: float,
+    config_augmentation: ConfigAugmentation,
+    config_extra_channels: ConfigExtraChannels,
     resize_to_size: int | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     """
@@ -254,6 +256,10 @@ def get_loaders(
         Minimum value for normalising the images.
     vmax : float
         Maximum value for normalising the images.
+    config_augmentation : ConfigAugmentation
+        Configuration for data augmentation.
+    config_extra_channels : ConfigExtraChannels
+        Configuration for extra channels.
     resize_to_size : int | None, optional
         Resize images and masks to this size, by default None (no resizing).
 
@@ -271,10 +277,13 @@ def get_loaders(
         mask_files=train_mask_files,
         vmin=vmin,
         vmax=vmax,
-        augment_flip_rot=AUGMENTATION_FLIP_ROT,
-        augment_scale=AUGMENTATION_SCALE,
-        augment_max_zoom_percentage=AUGMENTATION_SCALE_MAX_ZOOM_PERCENTAGE,
+        augment_flip_rot=config_augmentation.flip_rotate,
+        augment_scale=config_augmentation.scale,
+        augment_max_zoom_percentage=config_augmentation.scale_max_zoom_percentage,
         resize_to_size=resize_to_size,
+        hessian=config_extra_channels.hessian.enabled,
+        hessian_sigmas=config_extra_channels.hessian.sigmas,
+        hessian_normalised=config_extra_channels.hessian.normalised,
     )
     val_dataset = SegmentationDataset(
         image_files=val_image_files,
@@ -283,8 +292,11 @@ def get_loaders(
         vmax=vmax,
         augment_flip_rot=False,
         augment_scale=False,
-        augment_max_zoom_percentage=AUGMENTATION_SCALE_MAX_ZOOM_PERCENTAGE,
+        augment_max_zoom_percentage=config_augmentation.scale_max_zoom_percentage,
         resize_to_size=resize_to_size,
+        hessian=config_extra_channels.hessian.enabled,
+        hessian_sigmas=config_extra_channels.hessian.sigmas,
+        hessian_normalised=config_extra_channels.hessian.normalised,
     )
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -465,6 +477,9 @@ class SegmentationDataset(torch.utils.data.Dataset):
         augment_scale: bool,
         augment_max_zoom_percentage: float,
         resize_to_size: int | None,
+        hessian: bool,
+        hessian_sigmas: list[float],
+        hessian_normalised: bool,
     ) -> None:
         """Initialise."""
         self.image_files = image_files
@@ -475,6 +490,9 @@ class SegmentationDataset(torch.utils.data.Dataset):
         self.augment_scale = augment_scale
         self.augment_max_zoom_percentage = augment_max_zoom_percentage
         self.resize_to_size = resize_to_size
+        self.hessian = hessian
+        self.hessian_sigmas = hessian_sigmas
+        self.hessian_normalised = hessian_normalised
 
     def __len__(self) -> int:
         """Return the length of the dataset."""
@@ -521,12 +539,12 @@ class SegmentationDataset(torch.utils.data.Dataset):
         # add channel dimension to the image tensor
         image = image.unsqueeze(0)  # [C, H, W]
 
-        if EXTRA_CHANNELS_HESSIAN:
+        if self.hessian:
             # Add hessian channel to the image tensor for better feature extraction
             # Calculate the hessian before normalising the image
             image_hessian = hessian(
                 image=image_original.squeeze(0).numpy(),
-                sigmas=EXTRA_CHANNELS_HESSIAN_SIGMAS,
+                sigmas=self.hessian_sigmas,
                 mode="reflect",
                 # beta = 0.1,
                 # scale_step = 1.0,
@@ -536,7 +554,7 @@ class SegmentationDataset(torch.utils.data.Dataset):
             # put it into the image tensor
             image_hessian = torch.from_numpy(image_hessian).float().unsqueeze(0)  # [C, H, W]
             # normalise the hessian channel if needed
-            if EXTRA_CHANNELS_HESSIAN_NORMALISED:
+            if self.hessian_normalised:
                 image_hessian = torch.clamp(image_hessian, self.vmin, self.vmax)
                 image_hessian = (image_hessian - self.vmin) / (self.vmax - self.vmin)
             # concatenate the hessian channel to the image tensor
@@ -617,40 +635,61 @@ def export_checkpoint_as_model_bundle(
         yaml.dump(training_metadata, file)
 
 
-def main():
+def main(config_path: Path):
 
-    config: ConfigTrain = load_config("./training_config.yaml")
+    config: ConfigTrain = load_config(config_path)
 
-    seed_everything(SEED)
+    # Handle the paths in the config, making them absolute if they are not already
+    if config.path_data.is_absolute() is False:
+        config.path_data = config.path_base / config.path_data
+        assert config.path_data.exists(), f"Data path {config.path_data} does not exist."
+    if config.path_bundle_save_dir.is_absolute() is False:
+        config.path_bundle_save_dir = config.path_base / config.path_bundle_save_dir
+        config.path_bundle_save_dir.mkdir(parents=True, exist_ok=True)
+    if config.path_predictions.is_absolute() is False:
+        config.path_predictions = config.path_base / config.path_predictions
+        config.path_predictions.mkdir(parents=True, exist_ok=True)
+
+    if config.run_name == "":
+        config.run_name = generate_slug(2)
+
+    dir_path_bundle = config.path_bundle_save_dir / f"model_bundle_{config.run_name}"
+
+    # get terminal width for printing
+    terminal_width = get_terminal_size().columns
+    print("\n\n" + "=" * terminal_width)
+    print(f"Training run: {config.run_name}")
+
+    seed_everything(config.random_seed)
+
+    path_train_data = config.path_data
+    path_predictions = config.path_predictions
+    sample_types = config.sample_types
+    in_channels = 1 + len(config.extra_channels.hessian.sigmas) if config.extra_channels.hessian.enabled else 1
+    out_channels = 1  # hardcoded binary segmentation for now
 
     # Grab samples from directories for each sample type
     train_image_files, train_mask_files, num_samples_used = sample_type_split(
-        sample_type_dirs=[TRAINING_DATA_DIR / sample_type for sample_type in SAMPLE_TYPES],
-        num_samples_per_type=NUM_SAMPLES_PER_TYPE,
-        allow_too_few_samples=ALLOW_TOO_FEW_SAMPLES,
+        sample_type_dirs=[path_train_data / sample_type for sample_type in sample_types],
+        num_samples_per_type=config.num_samples_per_type,
+        allow_too_few_samples=config.allow_too_few_samples,
     )
-
-    # save the train image files and train mask files to a text file for testing
-    with open(BASE_DIR / "train_image_files_old.txt", "w") as f:
-        for item in train_image_files:
-            f.write(f"{item}\n")
-    with open(BASE_DIR / "train_mask_files_old.txt", "w") as f:
-        for item in train_mask_files:
-            f.write(f"{item}\n")
 
     # get data loaders
     train_loader, val_loader = get_loaders(
         images_paths=train_image_files,
         masks_paths=train_mask_files,
         val_split=0.2,
-        batch_size=BATCH_SIZE,
-        vmin=VMIN,
-        vmax=VMAX,
-        resize_to_size=RESIZE_TO_SIZE,
+        batch_size=config.batch_size,
+        vmin=config.normalisation.vmin,
+        vmax=config.normalisation.vmax,
+        config_augmentation=config.augmentation,
+        config_extra_channels=config.extra_channels,
+        resize_to_size=config.model_input_size,
     )
 
     # initialise model, loss function, and optimiser
-    model = ResUNet(in_channels=IN_CHANNELS, out_channels=OUT_CHANNELS).to(DEVICE)
+    model = ResUNet(in_channels=in_channels, out_channels=out_channels).to(DEVICE)
     # criterion = BCEWithLogitsDiceLoss(bce_weight=0.5)
     # add positive weighting
     positive_pixels = 0
@@ -691,42 +730,6 @@ def main():
         # save checkpoint if it's the best so far
         if val_dice_loss < best_val_loss:
             best_val_loss = val_dice_loss
-
-            # checkpoint = {
-            #     # the model parameters (weights and biases)
-            #     "model_state_dict": model.state_dict(),
-            #     # the optimiser state (including learning rate, momentum etc)
-            #     "optimiser_state_dict": optimiser.state_dict(),
-            #     # the scheduler state (including learning rate, momentum etc) - different from optimiser state dict
-            #     "scheduler_state_dict": scheduler.state_dict(),
-            #     "epoch": epoch,
-            #     "best_val_loss": best_val_loss,
-            #     "hyperparameters": {
-            #         "batch_size": BATCH_SIZE,
-            #         "epochs": EPOCHS,
-            #         "learning_rate": LEARNING_RATE,
-            #         "in_channels": IN_CHANNELS,
-            #         "out_channels": OUT_CHANNELS,
-            #         "vmin": VMIN,
-            #         "vmax": VMAX,
-            #         "resize_to_size": RESIZE_TO_SIZE,
-            #         "augmentation_flip_rot": AUGMENTATION_FLIP_ROT,
-            #         "augmentation_scale": AUGMENTATION_SCALE,
-            #         "augmentation_scale_max_zoom_percentage": AUGMENTATION_SCALE_MAX_ZOOM_PERCENTAGE,
-            #         "extra_channels_hessian": EXTRA_CHANNELS_HESSIAN,
-            #         "extra_channels_hessian_normalised": EXTRA_CHANNELS_HESSIAN_NORMALISED,
-            #         "extra_channels_hessian_sigmas": EXTRA_CHANNELS_HESSIAN_SIGMAS,
-            #         "eval_height_threshold": EVAL_HEIGHT_THRESHOLD,
-            #     },
-            #     "data": {
-            #         "sample_types": SAMPLE_TYPES,
-            #         "num_samples_per_type": NUM_SAMPLES_PER_TYPE,
-            #     },
-            #     "misc": {
-            #         "seed": SEED,
-            #         "device": str(DEVICE),
-            #     },
-            # }
 
             # torch.save(checkpoint, MODEL_SAVE_PATH)
             # print(f"Saved best model with val loss: {best_val_loss:.4f}")
@@ -871,4 +874,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(config_path=Path("./training_config.yaml"))
