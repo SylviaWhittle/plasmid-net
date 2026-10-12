@@ -704,7 +704,7 @@ def main(config_path: Path):
     )
     unweighted_criterion = BCEWithLogitsDiceLoss(pos_weight=None)
     # use adam since using batchnorm and relu
-    optimiser = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optimiser = optim.Adam(model.parameters(), lr=config.learning_rate)
     # Gradually drop the learning rate if the validation loss plateaus
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimiser, mode="min", factor=0.5, patience=3)
 
@@ -713,7 +713,7 @@ def main(config_path: Path):
     start_time = datetime.now()
 
     print("\n--- Starting training ---\n")
-    for epoch in range(EPOCHS):
+    for epoch in range(config.epochs):
         train_loss = train_one_epoch(model, train_loader, weighted_criterion, optimiser, DEVICE)
         weighted_val_loss = validate(model, val_loader, weighted_criterion, DEVICE)
         unweighted_val_loss = validate(model, val_loader, unweighted_criterion, DEVICE)
@@ -724,7 +724,7 @@ def main(config_path: Path):
         current_lr = optimiser.param_groups[0]["lr"]
 
         print(
-            f"Epoch [{epoch+1}/{EPOCHS}] - Train Loss: {train_loss:.4f}, Weighted Loss: {weighted_val_loss:.4f}, Unweighted Loss: {unweighted_val_loss:.4f}, Dice Loss: {val_dice_loss:.4f}, LR: {current_lr:.6f}"
+            f"Epoch [{epoch+1}/{config.epochs}] - Train Loss: {train_loss:.4f}, Weighted Loss: {weighted_val_loss:.4f}, Unweighted Loss: {unweighted_val_loss:.4f}, Dice Loss: {val_dice_loss:.4f}, LR: {current_lr:.6f}"
         )
 
         # save checkpoint if it's the best so far
@@ -738,7 +738,7 @@ def main(config_path: Path):
 
             export_checkpoint_as_model_bundle(
                 config=config,
-                path_bundle_dir=Path("./model_bundle_attempt_parity"),
+                path_bundle_dir=dir_path_bundle,
                 model=model,
                 optimiser=optimiser,
                 scheduler=scheduler,
@@ -747,8 +747,8 @@ def main(config_path: Path):
                 best_val_loss=best_val_loss,
                 timestamp=timestamp,
                 time_trained=time_trained,
-                in_channels=IN_CHANNELS,
-                out_channels=OUT_CHANNELS,
+                in_channels=in_channels,
+                out_channels=out_channels,
                 device=DEVICE,
             )
 
@@ -756,24 +756,24 @@ def main(config_path: Path):
     print(f"Best validation loss: {best_val_loss:.4f}")
     print("Training stats:")
     print(f"  - Device: {DEVICE}")
-    print(f"  - Seed: {SEED}")
-    print(f"  - Total epochs: {EPOCHS}")
-    print(f"  - Batch size: {BATCH_SIZE}")
-    print(f"  - Initial learning rate: {LEARNING_RATE}")
-    print(f"  - Model saved to: {"XXXX"}")
-    print(f"  - Number of samples requested per type: {NUM_SAMPLES_PER_TYPE}")
+    print(f"  - Seed: {config.random_seed}")
+    print(f"  - Total epochs: {epoch}")
+    print(f"  - Batch size: {config.batch_size}")
+    print(f"  - Initial learning rate: {config.learning_rate}")
+    print(f"  - Model saved to: {config.path_bundle_save_dir}")
+    print(f"  - Number of samples requested per type: {config.num_samples_per_type}")
     print(f"  - Number of samples actually used per type: {num_samples_used}")
-    print(f"  - Sample types: {SAMPLE_TYPES}")
+    print(f"  - Sample types: {config.sample_types}")
     print("  - Extra channels")
-    print(f"    - Hessian : {EXTRA_CHANNELS_HESSIAN}")
-    print(f"      - Hessian normalised : {EXTRA_CHANNELS_HESSIAN_NORMALISED}")
-    print(f"      - Hessian sigmas : {EXTRA_CHANNELS_HESSIAN_SIGMAS}")
+    print(f"    - Hessian : {config.extra_channels.hessian.enabled}")
+    print(f"      - Hessian normalised : {config.extra_channels.hessian.normalised}")
+    print(f"      - Hessian sigmas : {config.extra_channels.hessian.sigmas}")
     print("  - Augmentation:")
-    print(f"    - Flip and rotate: {AUGMENTATION_FLIP_ROT}")
-    print(f"    - Scale: {AUGMENTATION_SCALE}")
+    print(f"    - Flip and rotate: {config.augmentation.flip_rotate}")
+    print(f"    - Scale: {config.augmentation.scale}")
 
     # load the model
-    model = ResUNet(in_channels=IN_CHANNELS, out_channels=OUT_CHANNELS).to(DEVICE)
+    model = ResUNet(in_channels=in_channels, out_channels=out_channels).to(DEVICE)
     # Load the best model and evaluate on the validation set
     checkpoint = torch.load(Path("./model_bundle_attempt_parity") / "model_state_dict.pth", map_location=DEVICE)
     model.load_state_dict(checkpoint)
@@ -787,7 +787,7 @@ def main(config_path: Path):
     model.eval()
     with torch.no_grad():
         num_rows = len(val_loader)
-        num_cols = IN_CHANNELS + OUT_CHANNELS * 2 + 1 + 1 + 1 + 1
+        num_cols = in_channels + out_channels * 2 + 1 + 1 + 1 + 1
         # input channels
         # target channels
         # classical threshold binary
@@ -813,7 +813,7 @@ def main(config_path: Path):
             plt.axis("off")
             col_index += 1
 
-            if EXTRA_CHANNELS_HESSIAN:
+            if config.extra_channels.hessian.enabled:
                 # plot the hessian channel
                 plt.subplot(num_rows, num_cols, i * num_cols + col_index + 1)
                 plt.imshow(images[0, 1].cpu(), cmap="gray")
@@ -829,7 +829,7 @@ def main(config_path: Path):
             col_index += 1
 
             # classical threshold binary mask
-            classical_threshold_mask = (images[0, 0] > EVAL_HEIGHT_THRESHOLD).float()
+            classical_threshold_mask = (images[0, 0] > config.evaluation.classical_threshold).float()
             plt.subplot(num_rows, num_cols, i * num_cols + col_index + 1)
             plt.imshow(classical_threshold_mask.cpu(), cmap="gray")
             plt.title("Threshold Binary Mask")
@@ -869,8 +869,8 @@ def main(config_path: Path):
         plt.tight_layout()
         # save the figure
         # create a guid for the image based on index and epoch
-        image_guid = f"val_predictions_epoch_{EPOCHS}"
-        plt.savefig(PREDICTIONS_DIR / f"prediction_{image_guid}.png")
+        image_guid = f"val_predictions_epoch_{config.epochs}"
+        plt.savefig(path_predictions / f"prediction_{image_guid}_{config.run_name}.png")
 
 
 if __name__ == "__main__":
