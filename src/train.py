@@ -17,7 +17,7 @@ from skimage.morphology import skeletonize
 
 from ruamel.yaml import YAML
 
-from src.resunet import ResUNet
+from src.model import create_model
 from src.loss import BCEWithLogitsDiceLoss
 
 if torch.cuda.is_available():
@@ -26,38 +26,6 @@ elif torch.backends.mps.is_available():
     DEVICE = torch.device("mps")
 else:
     DEVICE = torch.device("cpu")
-BATCH_SIZE = 8
-EPOCHS = 50
-LEARNING_RATE = 1e-4
-MODEL_SAVE_PATH = "resunet_model.pth"
-BASE_DIR = Path("/Users/sylvi/topo_data/dna-damage-unet")
-PREDICTIONS_DIR = BASE_DIR / "predictions"
-PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)  # create the directory if it doesn't exist
-
-SAMPLE_TYPES = ["cesium"]
-
-NUM_SAMPLES_PER_TYPE = [1000]
-SEED = 0
-TRAINING_DATA_DIR = BASE_DIR / "data"
-ALLOW_TOO_FEW_SAMPLES = True
-AUGMENTATION_FLIP_ROT = True
-AUGMENTATION_SCALE = False
-AUGMENTATION_SCALE_MAX_ZOOM_PERCENTAGE = 0.2
-
-EXTRA_CHANNELS_HESSIAN = False  # whether to add hessian channel to the input images
-EXTRA_CHANNELS_HESSIAN_SIGMAS = [3.0]  # list of sigmas to use for the hessian filter
-EXTRA_CHANNELS_HESSIAN_NORMALISED = True
-
-RESIZE_TO_SIZE = 256  # resize images and masks to this size for training and validation
-# normalisation values for the images
-VMIN = -1.0
-VMAX = 5.0
-
-IN_CHANNELS = 1 + len(EXTRA_CHANNELS_HESSIAN_SIGMAS) if EXTRA_CHANNELS_HESSIAN else 1
-OUT_CHANNELS = 1
-
-# eval
-EVAL_HEIGHT_THRESHOLD = (1.1 - VMIN) / (VMAX - VMIN)  # threshold for classical height-based thresholding
 
 
 class ConfigNormalisation(BaseModel):
@@ -689,7 +657,12 @@ def main(config_path: Path):
     )
 
     # initialise model, loss function, and optimiser
-    model = ResUNet(in_channels=in_channels, out_channels=out_channels).to(DEVICE)
+    model = create_model(
+        config={
+            "in_channels": in_channels,
+            "out_channels": out_channels,
+        }
+    ).to(DEVICE)
     # criterion = BCEWithLogitsDiceLoss(bce_weight=0.5)
     # add positive weighting
     positive_pixels = 0
@@ -742,7 +715,7 @@ def main(config_path: Path):
                 model=model,
                 optimiser=optimiser,
                 scheduler=scheduler,
-                source_model_file=Path(__file__).parent / "resunet.py",
+                source_model_file=Path(__file__).parent / "model.py",
                 epoch=epoch,
                 best_val_loss=best_val_loss,
                 timestamp=timestamp,
@@ -773,9 +746,16 @@ def main(config_path: Path):
     print(f"    - Scale: {config.augmentation.scale}")
 
     # load the model
-    model = ResUNet(in_channels=in_channels, out_channels=out_channels).to(DEVICE)
+    model = create_model(
+        config={
+            "in_channels": in_channels,
+            "out_channels": out_channels,
+        }
+    ).to(DEVICE)
     # Load the best model and evaluate on the validation set
-    checkpoint = torch.load(Path("./model_bundle_attempt_parity") / "model_state_dict.pth", map_location=DEVICE)
+    print("--- Evaluation ---")
+    print(f"Loading model from {dir_path_bundle}")
+    checkpoint = torch.load(dir_path_bundle / "model_state_dict.pth", map_location=DEVICE)
     model.load_state_dict(checkpoint)
     model.to(DEVICE)
     model.eval()
